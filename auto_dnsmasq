@@ -12,17 +12,19 @@ show_help() {
     echo -e "Usage: $0 [options]\n"
     
     echo -e "\nManage:" 
-    echo -e "           --rules-id      <id>                target dnsmasq rules id"
-    echo -e "       -D  --configure     <configure file>    update dnsmasq configure."
-    echo -e "       -l  --list-rules                        List AutoDnsmasq Rules"
+    echo -e "           --rules-id          <id>                target dnsmasq rules id"
+    echo -e "       -D  --configure         <configure file>    update dnsmasq configure."
+    echo -e "       -l  --list                                  List AutoDnsmasq Rules"
+#    echo -e "           --install                               Install AutoDnsmasq service."
+#    echo -e "           --uninstall                             Uninstall AutoDnsmasq service"
 
     echo -e "\nOutput:"
     echo -e "       -o  --output            <file>          save to <file>"
     echo -e "           --domain-list                       generate domain list only ( while dnsmasq rules will be generated as default )"
-#    echo -e "           --ip-list                           generate ip list through targeted DNS server. "
-#    echo -e "           --ip-set-append     <IPSet>         resolve domains through targeted DNS server and append to ipset"
-#    echo -e "       -I  --ip-set            <IPSet>         resolve domains through targeted DNS server and update ipset"
-    echo -e "       -i  --ipset-conf        <IPSet>         Specifed IPSet for rules" 
+    echo -e "           --ip-list                           generate ip list through targeted DNS server. "
+    echo -e "           --ipset-append                      resolve domains through targeted DNS server and append to ipset"
+    echo -e "           --ipset-update                      Update IPSet"
+    echo -e "       -i  --ipset             <IPSet>         Specifed IPSet"
 
     echo -e "\nDNS Options:"
     echo -e "       -r  --target-dns    <address:port>|<address>"
@@ -33,6 +35,7 @@ show_help() {
     echo -e "       -g  --from-url  <url>                   get GFWList from <url>"
     echo -e "           default: $GFWLIST_URL"
     echo -e "       -h  --help                              show help message"
+    echo -e "           --force                             Overwrite without prompting"
 }
 
 
@@ -87,6 +90,12 @@ check_dependencies() {
         declare -g _do_dns_resolve=$__result
     fi
 
+    if [ $REQUIRE_IPSET ]; then
+        echo -ne "checking ipset..." >&2
+        check_exist __result ipset || ( echo -e "no" >&2; return 2)
+        echo -e "$__result" >&2
+    fi
+
 }
 
 list_rules_pack_list() {
@@ -95,7 +104,7 @@ list_rules_pack_list() {
     echo -e "Available rules pack:"
     # find beginning tag and mark --> append line to hold space according the marks
     # --> finally swap the spaces, remove marks and print
-    sed -En 's/#\s*!AutoDnsmasqBegin!(.+?)!/##\1/g;/\#\#/H;${x;s/#//g;p}' "$_conf_file"
+    sed -En 's/#\s*!AutoDnsmasqBegin!(.+?)!/\1/p' "$_conf_file"
 }
 
 list_dnsmasq_rule_pack() {
@@ -161,9 +170,61 @@ do_gen_dnsmasq_rules() {
     _domains=$1
     
     sed -E "s/(.+)/server=\/\1\/$DNS_SERVER\#$DNS_PORT/g" "$_domains"
-    if [ $RULES_IPSET ]; then
-        sed -E "s/(.+)/ipset=\/\1\/$RULES_IPSET/g" "$_domains"
+    if [ $TARGET_IPSET ]; then
+        sed -E "s/(.+)/ipset=\/\1\/$TARGET_IPSET/g" "$_domains"
     fi
+}
+
+
+do_gen_ip_list() {
+    _domains_file=$1
+    declare -i _domains_count=$(cat $_domains_file | wc -l)
+    declare -i _resolve_count=0
+    
+    unset AUTO_DNSMASQ_INTRUPT
+    trap "AUTO_DNSMASQ_INTRUPT=1" SIGINT
+
+    case $_do_dns_resolve in
+        nslookup)
+            if [ $DNS_PORT ]; then
+                _options=-port\=$DNS_PORT
+            fi
+
+            for domain in $(cat $_domains_file); do
+                echo "[ $_resolve_count / $_domains_count ] Resolve: $domain..." >&2
+                nslookup "$domain" $_options $DNS_SERVER | \
+                    sed -En '1,3d;s/Address:\s*(.*)/\1/p'
+                if [ $AUTO_DNSMASQ_INTRUPT ]; then
+                    echo "Terminated by user. exiting..." >&2
+                    unset AUTO_DNSMASQ_INTRUPT
+                    trap - SIGINT
+                    return 50 
+                fi
+                _resolve_count=_resolve_count+1
+            done
+        ;;
+        dig)
+            if [ $DNS_SERVER ]; then
+                _options=@$DNS_SERVER
+            fi
+            if [ $DNS_PORT ]; then
+                _options=$(_options) -p $DNS_PORT
+            fi
+
+            for domain in $(cat $_domains_file); do
+                echo "[ $_resolve_count / $_domains_count] Resolve: $domain" >&2
+                dig "$domain" $_options | \
+                    sed -En '/ANSWER SECTION:/,/;;.*/{s/.*IN\s+A\s+(.*)/\1/p}'
+                if [ $AUTO_DNSMASQ_INTRUPT ]; then
+                    echo "Terminated by user. exiting..." >&2
+                    unset AUTO_DNSMASQ_INTRUPT
+                    trap - SIGINT
+                    return 50
+                fi
+                _resolve_count=_resolve_count+1
+            done
+        ;;
+    esac
 }
 
 gen_dnsmasq_main() {
@@ -202,6 +263,64 @@ gen_dnsmasq_main() {
         return 0
     fi
 
+    if [ $IP_SET_APPEND ] || [ $IP_SET_UPDATE ]; then
+        _ipset_info=$(ipset list $TARGET_IPSET 2>&1)
+        if echo $_ipset_info | grep "not exist" -q ; then
+            echo "Create new ipset: $TARGET_IPSET" >&2
+            ipset create $TARGET_IPSET hash:ip || return 7
+        else
+            _ipset_type=$(echo $_ipset_info | sed -En 's/.*Type:\s*(\S+)\s*.*/\1/p')
+            if [ "$_ipset_type" != 'hash:ip' ] ; then
+                echo "Inproper IPSet type: $_ipset_type." >&2
+                if ! [ $FORCE_OVERWRITE ]; then
+                    echo "Add --force to overwrite the old." >&2
+                    return 8
+                else
+                    echo "Overwriting..." >&2
+                    ipset destroy $TARGET_IPSET || return 7
+                    ipset create $TARGET_IPSET hash:ip || return 7
+                fi
+            fi
+        fi
+
+        tmp_ip_list=/tmp/auto_dnsmasq_$RANDOM
+        do_gen_ip_list $_domain_list_tmp > $tmp_ip_list
+        retval=$?
+        if [ $retval != 0 ]; then
+            rm $tmp_ip_list
+            return $retval
+        fi
+
+        
+        if [ $IP_SET_UPDATE ]; then
+            ipset flush $TARGET_IPSET || return 7
+        fi
+        trap "AUTO_DNSMASQ_INTRUPT=1" SIGINT
+        
+        for ip in $(cat $tmp_ip_list); do
+            ipset add gfwlist $ip
+            if [ $AUTO_DNSMASQ_INTRUPT ]; then
+                echo -e "Terminated by user." >&2
+                break
+            fi
+        done
+        trap - SIGINT
+        rm tmp_ip_list
+        return 0
+    fi
+
+    if [ $GEN_IP_LIST ]; then
+        echo -e "Generating ip list..." >&2
+        if [ $TO_FILE ]; then
+            do_gen_ip_list $_domain_list_tmp > "$TO_FILE" || return 6
+        else
+            do_gen_ip_list $_domain_list_tmp || return 6
+        fi
+        rm $_domain_list_tmp
+        unset _domain_list_tmp
+        return 0
+    fi
+
     echo -e "Generating dnsmasq rules..." >&2
     _temp_rules_file=/tmp/auto_dnsmasq_rules_$RANDOM
     do_gen_dnsmasq_rules "$_domain_list_tmp" > "$_temp_rules_file" || return 5
@@ -221,34 +340,54 @@ gen_dnsmasq_main() {
     fi
     rm $_temp_rules_file
 
+
     echo -e "Finished." >&2
 }
 
 check_args() {
-    if ! [ $LIST_RULES_PACK ]; then
-        declare -g RULES_NEED_UPDATE=1
-        if ! [ -e $DNSMASQ_CONFIG ]; then
-            echo -e "Not found: $DNSMASQ_CONFIG"
-            return 6
+    if [ $LIST_RULES_PACK ]; then
+        if ! [ $DNSMASQ_CONFIG ] ; then
+            echo -e "No specified configure." >&2
+            return 1
+        elif ! [ -e $DNSMASQ_CONFIG ]; then
+            echo -e "Not found: $DNSMASQ_CONFIG" >&2
+            return 1
         fi
+        return 0
+    fi
+
+
+    declare -g RULES_NEED_UPDATE=1
+
+    if [ $GEN_DOMAIN_LIST ]; then
+        return 0
     fi
     
-    # Default DNS Port 53
-    if [ $RULES_NEED_UPDATE ]; then
-        if ! [ $GEN_DOMAIN_LIST ]; then
-            if ! [ $RULES_ID ] && [ $DNSMASQ_CONFIG ]; then
-                echo -e "No specified rule pack id."
-                return 1
-            fi
+    if ! [ $IP_SET_UPDATE ] && ! [ $IP_SET_APPEND ] && ! [ $GEN_IP_LIST ]; then
+        # Generate dnsmasq rules
+        if ! [ $RULES_ID ] && [ $DNSMASQ_CONFIG ]; then 
+            echo -e "No specified rule pack id. (see --rules-id)" >&2 
+            return 1
         fi
-
+ 
         if ! [ $DNS_SERVER ]; then
             echo -e "No target DNS Server (see --target-dns)." >&2
             return 1
-        elif ! [ $DNS_PORT ]; then
-           echo -e "Use default DNS Port: 53." >&2
-           declare -g DNS_PORT=53
         fi
+        if ! [ $DNS_PORT ]; then
+            echo -e "Use default DNS Port: 53." >&2
+            declare -g DNS_PORT=53
+        fi
+        
+    else
+        if ! [ $GEN_IP_LIST ]; then
+            if ! [ $TARGET_IPSET ]; then
+                echo -e "No target ipset. ( see --ipset )" >&2
+                return 1
+            fi
+            declare -g REQUIRE_IPSET=1
+        fi 
+        declare -g DOMAINS_NEED_RESOLVE=1
     fi
 }
 
@@ -292,19 +431,23 @@ do
             TARGET_CONFIG_PARSED=1
             WAIT_PARAMS=1
         ;;
-        
-        #"--ip-set")
-        #    IP_SET_UPDATE=1
-        #    DOMAINS_NEED_RESOLVE=1
-        #;;
-        #"-I")
-        #    IP_SET_UPDATE=1
-        #    DOMAINS_NEED_RESOLVE=1
-        #;;
-        #"--ip-set-append")
-        #    IP_SET_APPEND=1
-        #    DOMAINS_NEED_RESOLVE=1
-        #;;
+
+        "-i")
+            IP_SET_PARSED=1
+            WAIT_PARAMS=1
+        ;; 
+        "--ipset")
+            IP_SET_PARSED=1
+            WAIT_PARAMS=1
+        ;;
+
+        "--ipset-update")
+            IP_SET_UPDATE=1
+        ;;
+
+        "--ip-set-append")
+            IP_SET_APPEND=1
+        ;;
 
         "--target-dns")
             TARGET_DNS_PARSED=1
@@ -314,17 +457,12 @@ do
             TARGET_DNS_PARSED=1
             WAIT_PARAMS=1
         ;;
+        "--ip-list")
+            GEN_IP_LIST=1
+        ;;
         
         "--domain-list")
             GEN_DOMAIN_LIST=1
-        ;;
-        "--ipset-conf")
-            RULES_IPSET_PARSED=1
-            WAIT_PARAMS=1
-        ;;
-        "-i")
-            RULES_IPSET_PARSED=1
-            WAIT_PARAMS=1
         ;;
         
         "--rules-id")
@@ -337,6 +475,9 @@ do
         ;;
         "--list")
             LIST_RULES_PACK=1
+        ;;
+        "--force")
+            FORCE_OVERWRITE=1
         ;;
 
         *)
@@ -357,8 +498,8 @@ do
                 elif [ $RULES_ID_PARSED ]; then
                     RULES_ID=$1
                     unset RULES_ID_PARSED
-                elif [ $RULES_IPSET_PARSED ]; then
-                    RULES_IPSET=$1
+                elif [ $IP_SET_PARSED ]; then
+                    TARGET_IPSET=$1
                     unset RULES_IPSET_PARSED
                 fi
                 unset WAIT_PARAMS
