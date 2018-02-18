@@ -1,0 +1,394 @@
+#! /bin/bash
+
+CORE_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/dev_auto_update/list2dnsmasq'
+ADNS_CONF=/etc/auto_dnsmasq.conf
+ADNS_SYSTEMD=/usr/lib/systemd/system
+ADNS_SYSTEMD_SVR=auto-dnsmasq.service
+ADNS_SYSTEMD_TIMER=auto-dnsmasq.timer
+
+show_help() {
+    echo -e "Usage: $0 <command>"
+    echo -e ""
+    echo -e "command:"
+    echo -e "   install                         Install services."
+    echo -e "   uninstall                       Remove AutoDnsmasq services."
+    echo -e ""
+    echo -e "   set-config      <file>          Set dnsmasq configure file."
+    echo -e "   set-rules-id    <id>            Set rules id."
+    echo -e "   set-ipset       <ipset>         Set target ipset."
+    echo -e "   set-dns         <addr[:port]>   Set upstream dns."
+    echo -e "   update                          Update rules."
+    echo -e "   enable                          Enable services"
+    echo -e "   disable                         Disable services"
+    echo -e "   status                          Show configure"
+}
+
+check_timer_plan() {
+    __result_to=$1
+    if [ -d /usr/lib/systemd/system ]; then
+        eval $__result_to=systemd
+        return 0
+    elif [ "$(whereis cron)" != "" ]; then
+        eval $__result_to=cron
+        return 0
+    else
+        return 1
+    fi
+}
+
+check_exist() {
+    __result_to=$1
+    while [ $1 ]
+    do
+        shift 1
+        __path=$(whereis $1 | cut -d ':' -f 2 -) 
+        __path=${__path-}
+        if [ "$__path" != "" ]; then
+            eval $__result_to=$1
+            return 0
+        fi
+    done
+    
+    return 1
+}
+
+echo_red() {
+    _string='\033[31m'$1'\033[0m'
+    shift 1
+    echo $_string $*
+}
+
+check_dependencies() {
+    if [ "$(whoami)" != "root" ]; then
+        echo -e "Please run as root."
+        return 2
+    fi
+
+    if [ $REQUIRE_DOWNLOAD ]; then
+        echo -n "checking download tools... " >&2
+        check_exist __result wget curl || ( echo -e "no" >&2; return 2)
+        echo -e "$__result" >&2
+        _do_download=$__result
+    fi
+
+    if [ $REQUIRE_LIST2DNSMASQ ]; then
+        echo -n "checking list2dnsmasq... " >&2
+        check_exist __result list2dnsmasq || ( echo -e "no" >&2 ; return 2)
+        echo -e "yes" >&2
+    fi
+
+    if [ $REQUIRE_TIMER_PLANNER ]; then
+        echo -n "checking timer planner..." >&2
+        check_timer_plan __result || ( echo -e "unknown" >&2 ; return 2)
+        _timer_planner=$__result
+        echo "$__result" >&2
+    fi
+
+    echo -n "checking dnsmasq... " >&2
+    check_exist __result dnsmasq || {
+         echo -e "no" >&2
+         echo -e "Dnsmasq missing." >&2
+         return 2
+    }
+    echo -e "yes" >&2
+
+    echo -n "checking sed... " >&2
+    check_exist __result sed || {
+         echo -e "no" >&2
+         return 2
+    }
+    echo -e "yes" >&2
+}
+
+get_resource() {
+    _save_to=$1
+    _from=$2
+    case $_do_download in 
+        wget)
+            wget "$_from" -O "$_save_to" || return $?
+        ;;
+
+        curl)
+            curl --url "$_from" -o "$_save_to" || return $?
+        ;;
+    esac
+}
+
+adns_install() {
+    if [ -e /usr/sbin/auto_dnsmasq ]; then
+        echo -e "AutoDnsmasq already installed."
+        return 0
+    fi
+    
+    REQUIRE_DOWNLOAD=1
+    check_dependencies || return $?
+    
+    _core_tmp=/tmp/list2dnsmasq
+    get_resource "$_core_tmp" "$CORE_URL" || {
+        echo -e "Cannot get list2dnsmasq." >&2
+        return 2
+    }
+    chmod 755 $_core_tmp
+
+    cp -f "$0" /usr/sbin/auto-dnsmasq || {
+        echo -e "Error occurs when install /usr/sbin/auto-dnsmasq"
+        return 3
+    }
+    
+    mv -f $_core_tmp /usr/sbin/list2dnsmasq || {
+        echo -e "Error occurs when install /usr/sbin/list2dnsmasq"
+        return 3
+    }
+    
+    echo "Ininitialize..."
+    auto_dnsmasq status
+}
+
+adns_create_setting() {
+    echo -e "# --------------------------------------- #"
+    echo -e "#    Configure for AutoDnsmasq"
+    echo -e "# --------------------------------------- #"
+    echo -e ""
+    echo -e "dnsmasq_config=$SETTING_TARGET_CONF"
+    echo -e "ipset=$SETTING_IPSET"
+    echo -e "dns=$SETTING_UPSTREAM_DNS"
+    echo -e "dns_port=$SETTING_UPSTREAM_PORT"
+}
+
+adns_get_with_default() {
+    _name=$2
+    _result_to=$3
+    _default=$4
+
+    _got=$(sed -En '/#.*/d;s/'"$_name"'\s*=\s*(.*)/\1/p' $1 | head -n 1)
+    if ! [ $_got ]; then
+        eval $_result_to=$_default
+        return 1
+    else
+        eval $_result_to=$_got
+    fi
+}
+
+adns_load_setting() {
+    if ! [ -e $ADNS_CONF ]; then
+        echo -e "Configure file not found. creating..." >&2
+        SETTING_TARGET_CONF=/etc/dnsmasq.conf
+        SETTING_IPSET=auto_dnsmasq_gfwset
+        SETTING_UPSTREAM_DNS=8.8.8.8
+        SETTING_UPSTREAM_PORT=53
+        adns_create_setting > $ADNS_CONF || ( echo Failed. >&2 ; return 3)
+        chmod 644 $ADNS_CONF
+        return 1
+    fi
+
+    adns_get_with_default $ADNS_CONF dnsmasq_config SETTING_TARGET_CONF /etc/dnsmasq.conf || echo "dnsmasq_config=$SETTING_TARGET_CONF" >> "$ADNS_CONF"
+    adns_get_with_default $ADNS_CONF ipset SETTING_IPSET || echo "ipset=$SETTING_IPSET" >> "$ADNS_CONF"
+    adns_get_with_default $ADNS_CONF dns SETTING_UPSTREAM_DNS 8.8.8.8 || echo "dns=$SETTING_UPSTREAM_DNS" >> "$ADNS_CONF"
+    adns_get_with_default $ADNS_CONF dns_port SETTING_UPSTREAM_PORT || echo "dns_port=$SETTING_UPSTREAM_PORT" >> "$ADNS_CONF"
+}
+
+adns_status() {
+    check_dependencies || return $?
+
+    adns_load_setting 
+    declare -i load_setting_retval=$?
+    if [ $load_setting_retval -ge 2 ]; then
+        echo -e "Error occurs when loading setting." >&2
+        return 3
+    fi
+
+    echo "Dnamasq configure: $SETTING_TARGET_CONF"
+    echo "IP set: $SETTING_IPSET"
+    echo "Upstream DNS: $SETTING_UPSTREAM_DNS:$SETTING_UPSTREAM_PORT"
+    echo ""
+    
+    [ $load_setting_retval == 1 ] && { 
+        echo -e "Setting initialized."
+        echo -e "run:"
+        echo -e "   auto_dnsmasq enable"
+        echo -e "to enable services."
+        echo -e ""
+        echo -e "run:"
+        echo -e "   auto_dnsmasq help"
+        echo -e "to get help."
+    } >&2
+}
+
+adns_cat_systemd_service() {
+    echo '[Unit]'
+    echo 'Decription=Update GFWList to dnsmasq rules'
+    echo 'Wants=network.target'
+    echo 'Before=network.target'
+    echo ''
+    echo '[Service]'
+    echo 'Type=oneshot'
+    echo 'ExecStart=/usr/bin/auto_dnsmasq update'
+    echo ''
+    echo '[Install]'
+    echo 'WantedBy=multi-user.target'
+}
+
+adns_cat_systemd_timer() {
+    echo '[Unit]'
+    echo 'Description=Update GFWLidt to dnsmasq rules.'
+    echo ''
+    echo '[Timer]'
+    echo 'OnCalendar=hourly'
+    echo 'AccuracySec=30 minute'
+    echo 'Persistent=true'
+    echo ''
+    echo '[Install]'
+    echo 'WantedBy=timers.target'
+}
+
+adns_setup_systemd_services() {
+    if ! [ -e "$ADNS_SYSTEMD/$ADNS_SYSTEMD_SVR" ]; then
+        adns_cat_systemd_service > "$ADNS_SYSTEMD/$ADNS_SYSTEMD_SVR"
+    fi
+
+    if ! [ -e "$ADNS_SYSTEMD/$ADNS_SYSTEMD_TIMER" ]; then
+        adns_cat_systemd_timer > "$ADNS_SYSTEMD/$ADNS_SYSTEMD_TIMER"
+    fi
+}
+
+adns_setup_services() {
+    case $_timer_planner in
+        systemd)
+            echo "systemd as init daemon..." >&2
+            adns_setup_systemd_services || {
+                echo 'Failed.' >&2
+                return 5
+            }
+        ;;
+        *)
+            echo -e "AutoDnsmasq support $_timer_planner later." >&2
+            return 4
+        ;;
+    esac
+
+}
+
+adns_enable() { 
+    REQUIRE_TIMER_PLANNER=1
+
+    check_dependencies || return $? 
+
+    adns_load_setting || {
+        echo -e "Error occurs while loading setting."
+        return 3
+    } >&2
+
+    adns_setup_services || return $?
+
+    case $_timer_planner in
+        systemd)
+            systemctl enable $ADNS_SYSTEMD_TIMER || return $?
+        ;;
+
+        *)
+            return 6
+        ;;
+    esac
+}
+
+adns_disable() {
+    REQUIRE_TIMER_PLANNER=1
+
+    check_dependencies || return $?
+    case $_timer_planner in
+        systemd)
+            systemctl disable $ADNS_SYSTEMD_TIMER || return $?
+        ;;
+
+        *)
+            echo -e "AutoDnsmasq support $_timer_policy later." >&2
+            return 6
+    esac
+}
+
+adns_update() {
+    REQUIRE_LIST2DNSMASQ=1
+    check_dependencies || return $?
+    adns_load_setting || {
+        echo -e "Error occurs while loading setting."
+        return 3
+    }
+
+    if [ $SETTING_IPSET ]; then
+        _options_ipset="--ipset \"$SETTING_IPSET\""
+    else
+        _options_ipset=
+    fi
+
+    if [ $SETTING_UPSTREAM_PORT ]; then
+        _options_dns='-r '"$SETTING_UPSTREAM_DNS:$SETTING_UPSTREAM_PORT"
+    else
+        _options_dns=-r $SETTING_UPSTREAM_DNS 
+    fi
+
+    list2dnsmasq $_options_dns --rules-id auto_dnsmasq_gfwlist $_options_ipset -D "$SETTING_TARGET_CONF"
+
+}
+
+echo -e "AutoDnsmasq Commander"
+echo -e ""
+
+case $1 in
+    install)
+        shift 1
+        adns_install $*
+        exit $?
+    ;;
+
+    uninstall)
+    ;;
+    
+    set-config)
+    ;;
+    
+    set-rules-id)
+    ;;
+
+    set-ipset)
+    ;;
+
+    update)
+        shift 1
+        adns_update $*
+        exit $?
+    ;;
+
+    disable)
+        shift 1
+        adns_disable $*
+        exit $?
+    ;;
+
+    enable)
+        shift 1
+        adns_enable $*
+        exit $?
+    ;;
+    
+    status)
+        shift 1
+        adns_status $*
+        exit $?
+    ;;
+
+    check)
+        shift 1
+        adns_check $*
+        exit $?
+    ;;
+
+    help)
+        show_help
+        exit 0
+    ;;
+
+    *)
+        show_help
+        exit 0
+    ;;
+esac

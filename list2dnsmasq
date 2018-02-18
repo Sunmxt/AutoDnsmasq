@@ -15,8 +15,6 @@ show_help() {
     echo -e "           --rules-id          <id>                target dnsmasq rules id"
     echo -e "       -D  --configure         <configure file>    update dnsmasq configure."
     echo -e "       -l  --list                                  List AutoDnsmasq Rules"
-#    echo -e "           --install                               Install AutoDnsmasq service."
-#    echo -e "           --uninstall                             Uninstall AutoDnsmasq service"
 
     echo -e "\nOutput:"
     echo -e "       -o  --output            <file>          save to <file>"
