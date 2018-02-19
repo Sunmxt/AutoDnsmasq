@@ -5,8 +5,13 @@ ADNS_CONF=/etc/auto_dnsmasq.conf
 ADNS_SYSTEMD=/usr/lib/systemd/system
 ADNS_SYSTEMD_SVR=auto-dnsmasq.service
 ADNS_SYSTEMD_TIMER=auto-dnsmasq.timer
+ADNS_INSTALL_DIR=/usr/sbin
+ADNS_CORE_NAME=auto-dnsmasq
+ADNS_CONVERT_CORE_NAME=list2dnsmasq
 
 show_help() {
+    echo -e "AutoDnsmasq Commander"
+    echo -e ""
     echo -e "Usage: $0 <command>"
     echo -e ""
     echo -e "command:"
@@ -16,7 +21,8 @@ show_help() {
     echo -e "   set-config      <file>          Set dnsmasq configure file."
     echo -e "   set-rules-id    <id>            Set rules id."
     echo -e "   set-ipset       <ipset>         Set target ipset."
-    echo -e "   set-dns         <addr[:port]>   Set upstream dns."
+    echo -e "   set-dns         <addr>          Set upstream DNS."
+    echo -e "   set-dns-port    <port           Set upstream DNS port"
     echo -e "   update                          Update rules."
     echo -e "   enable                          Enable services"
     echo -e "   disable                         Disable services"
@@ -52,12 +58,6 @@ check_exist() {
     return 1
 }
 
-echo_red() {
-    _string='\033[31m'$1'\033[0m'
-    shift 1
-    echo $_string $*
-}
-
 check_dependencies() {
     if [ "$(whoami)" != "root" ]; then
         echo -e "Please run as root."
@@ -65,39 +65,28 @@ check_dependencies() {
     fi
 
     if [ $REQUIRE_DOWNLOAD ]; then
-        echo -n "checking download tools... " >&2
-        check_exist __result wget curl || ( echo -e "no" >&2; return 2)
-        echo -e "$__result" >&2
+        check_exist __result wget curl || ( echo "Download tools missing." >&2 ; return 2)
         _do_download=$__result
     fi
 
     if [ $REQUIRE_LIST2DNSMASQ ]; then
-        echo -n "checking list2dnsmasq... " >&2
-        check_exist __result list2dnsmasq || ( echo -e "no" >&2 ; return 2)
-        echo -e "yes" >&2
+        check_exist __result $ADNS_CONVERT_CORE_NAME || ( echo '$ADNS_CONVERT_CORE_NAME missing. Reinstall AutoDnsmasq please.' ; return 2)
     fi
 
     if [ $REQUIRE_TIMER_PLANNER ]; then
-        echo -n "checking timer planner..." >&2
-        check_timer_plan __result || ( echo -e "unknown" >&2 ; return 2)
+        check_timer_plan __result || ( echo 'Unknown init daemon.' ; return 2)
         _timer_planner=$__result
-        echo "$__result" >&2
     fi
 
-    echo -n "checking dnsmasq... " >&2
     check_exist __result dnsmasq || {
-         echo -e "no" >&2
          echo -e "Dnsmasq missing." >&2
          return 2
     }
-    echo -e "yes" >&2
 
-    echo -n "checking sed... " >&2
     check_exist __result sed || {
-         echo -e "no" >&2
-         return 2
+        echo "sed missing..." >&2
+        return 2
     }
-    echo -e "yes" >&2
 }
 
 get_resource() {
@@ -114,8 +103,13 @@ get_resource() {
     esac
 }
 
+adns_check_install() {
+    [ -e "$ADNS_INSTALL_DIR/$ADNS_CORE_NAME" ] && return 0
+    return 1
+}
+
 adns_install() {
-    if [ -e /usr/sbin/auto_dnsmasq ]; then
+    if adns_check_install; then
         echo -e "AutoDnsmasq already installed."
         return 0
     fi
@@ -130,18 +124,18 @@ adns_install() {
     }
     chmod 755 $_core_tmp
 
-    cp -f "$0" /usr/sbin/auto-dnsmasq || {
-        echo -e "Error occurs when install /usr/sbin/auto-dnsmasq"
+    cp -f "$0" "$ADNS_INSTALL_DIR/$ADNS_CORE_NAME" || {
+        echo -e "Error occurs when install $ADNS_INSTALL_DIR/$ADNS_CORE_NAME"
         return 3
     }
     
-    mv -f $_core_tmp /usr/sbin/list2dnsmasq || {
-        echo -e "Error occurs when install /usr/sbin/list2dnsmasq"
+    mv -f $_core_tmp $ADNS_INSTALL_DIR/$ADNS_CONVERT_CORE_NAME || {
+        echo -e "Error occurs when install $ADNS_CORE_NAME/$ADNS_CONVERT_CORE_NAME"
         return 3
     }
     
     echo "Ininitialize..."
-    auto_dnsmasq status
+    $ADNS_CORE_NAME status
 }
 
 adns_create_setting() {
@@ -153,6 +147,7 @@ adns_create_setting() {
     echo -e "ipset=$SETTING_IPSET"
     echo -e "dns=$SETTING_UPSTREAM_DNS"
     echo -e "dns_port=$SETTING_UPSTREAM_PORT"
+    echo -e "rules=$SETTING_RULES_ID"
 }
 
 adns_get_with_default() {
@@ -176,6 +171,7 @@ adns_load_setting() {
         SETTING_IPSET=auto_dnsmasq_gfwset
         SETTING_UPSTREAM_DNS=8.8.8.8
         SETTING_UPSTREAM_PORT=53
+        SETTING_RULES_ID=auto_dnsmasq_gfwlist
         adns_create_setting > $ADNS_CONF || ( echo Failed. >&2 ; return 3)
         chmod 644 $ADNS_CONF
         return 1
@@ -185,6 +181,7 @@ adns_load_setting() {
     adns_get_with_default $ADNS_CONF ipset SETTING_IPSET || echo "ipset=$SETTING_IPSET" >> "$ADNS_CONF"
     adns_get_with_default $ADNS_CONF dns SETTING_UPSTREAM_DNS 8.8.8.8 || echo "dns=$SETTING_UPSTREAM_DNS" >> "$ADNS_CONF"
     adns_get_with_default $ADNS_CONF dns_port SETTING_UPSTREAM_PORT || echo "dns_port=$SETTING_UPSTREAM_PORT" >> "$ADNS_CONF"
+    adns_get_with_default $ADNS_CONF rules SETTING_RULES_ID auto_dnsmasq_gfwlist || echo "rules=$SETTING_RULES_ID" >> "$ADNS_CONF"
 }
 
 adns_status() {
@@ -205,24 +202,24 @@ adns_status() {
     [ $load_setting_retval == 1 ] && { 
         echo -e "Setting initialized."
         echo -e "run:"
-        echo -e "   auto_dnsmasq enable"
+        echo -e "   $ADNS_CORE_NAME enable"
         echo -e "to enable services."
         echo -e ""
         echo -e "run:"
-        echo -e "   auto_dnsmasq help"
+        echo -e "   $ADNS_CORE_NAME help"
         echo -e "to get help."
     } >&2
 }
 
 adns_cat_systemd_service() {
     echo '[Unit]'
-    echo 'Decription=Update GFWList to dnsmasq rules'
+    echo 'Description=Update GFWList to dnsmasq rules'
     echo 'Wants=network.target'
     echo 'Before=network.target'
     echo ''
     echo '[Service]'
-    echo 'Type=oneshot'
-    echo 'ExecStart=/usr/bin/auto_dnsmasq update'
+    echo 'Type=simple'
+    echo "ExecStart=$ADNS_INSTALL_DIR/$ADNS_CORE_NAME update"
     echo ''
     echo '[Install]'
     echo 'WantedBy=multi-user.target'
@@ -230,11 +227,11 @@ adns_cat_systemd_service() {
 
 adns_cat_systemd_timer() {
     echo '[Unit]'
-    echo 'Description=Update GFWLidt to dnsmasq rules.'
+    echo 'Description=Update GFWList to dnsmasq rules.'
     echo ''
     echo '[Timer]'
-    echo 'OnCalendar=hourly'
-    echo 'AccuracySec=30 minute'
+    echo 'OnCalendar=daily'
+    echo 'AccuracySec=6h'
     echo 'Persistent=true'
     echo ''
     echo '[Install]'
@@ -326,12 +323,43 @@ adns_update() {
         _options_dns=-r $SETTING_UPSTREAM_DNS 
     fi
 
-    list2dnsmasq $_options_dns --rules-id auto_dnsmasq_gfwlist $_options_ipset -D "$SETTING_TARGET_CONF"
+    $ADNS_CONVERT_CORE_NAME $_options_dns --rules-id $SETTING_RULES_ID $_options_ipset -D "$SETTING_TARGET_CONF"
 
 }
 
-echo -e "AutoDnsmasq Commander"
-echo -e ""
+adns_uninstall() {
+    if ! adns_check_install; then
+        echo -e "AutoDnsmasq is not installed." >&2
+        return 1
+    fi
+
+    $ADNS_CORE_NAME disable 
+    rm -f "$ADNS_INSTALL_DIR/$ADNS_CORE_NAME" 
+    rm -f "$ADNS_INSTALL_DIR/$ADNS_CONVERT_CORE_NAME" 
+    rm -f "$ADNS_SYSTEMD/$ADNS_SYSTEMD_SVR"
+    rm -f "$ADNS_SYSTEMD/$ADNS_SYSTEMD_TIMER"
+    mv -f "$ADNS_CONF" "$ADNS_CONF.bak"
+
+    echo -e "Finished." >&2
+}
+
+adns_set_configure_value() {
+    _name=$1
+    _value=$2
+
+    mv -f "$ADNS_CONF" "$ADNS_CONF.bak"
+    sed -En '/^'$_name'=.*/d;p' "$ADNS_CONF.bak" > "$ADNS_CONF"
+    echo $_name=$_value >> "$ADNS_CONF"
+}
+
+adns_check_and_set_configure() {
+    if ! [ $2 ]; then
+        echo -e "Value missing." >&2
+        return 8
+    fi
+
+    adns_set_configure_value "$1" "$2"
+}
 
 case $1 in
     install)
@@ -341,15 +369,39 @@ case $1 in
     ;;
 
     uninstall)
+        shift 1
+        adns_uninstall $*
+        exit $?
     ;;
     
     set-config)
+        shift 1
+        adns_check_and_set_configure dnsmasq_config $*
+        exit $?
     ;;
     
     set-rules-id)
+        shift 1
+        adns_check_and_set_configure rules $*
+        exit $?
     ;;
 
     set-ipset)
+        shift 1
+        adns_check_and_set_configure ipset $*
+        exit $?
+    ;;
+
+    set-dns)
+        shift 1
+        adns_check_and_set_configure dns $*
+        exit $?
+    ;;
+
+    set-dns-port)
+        shift 1
+        adns_check_and_set_configure dns_port $*
+        exit $?
     ;;
 
     update)
@@ -376,11 +428,6 @@ case $1 in
         exit $?
     ;;
 
-    check)
-        shift 1
-        adns_check $*
-        exit $?
-    ;;
 
     help)
         show_help
