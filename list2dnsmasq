@@ -15,8 +15,7 @@ show_help() {
     echo -e "           --rules-id          <id>                target dnsmasq rules id"
     echo -e "       -D  --configure         <configure file>    update dnsmasq configure."
     echo -e "       -l  --list                                  List AutoDnsmasq Rules"
-#    echo -e "           --install                               Install AutoDnsmasq service."
-#    echo -e "           --uninstall                             Uninstall AutoDnsmasq service"
+    echo -e "           --delete                                Delete Rules"
 
     echo -e "\nOutput:"
     echo -e "       -o  --output            <file>          save to <file>"
@@ -135,7 +134,8 @@ auto_dnsmasq_rule_pack_update() {
     fi
     mv -f $_tmp_conf "$_conf_file"
 }
- 
+
+
 get_gfw_list() {
 
     _temp_file=/tmp/gfw_dnsmasq_$RANDOM
@@ -227,6 +227,14 @@ do_gen_ip_list() {
     esac
 }
 
+delete_dnsmasq_rule_pack() {
+    _conf_file=$2
+    _rule_id=$1
+
+    sed -En '/#\s*!AutoDnsmasqBegin!'$_rule_id'!/,/#\s*!AutoDnsmasqEnd!'$_rule_id'!/d;p' "$_conf_file" > "$_conf_file.new"
+    mv -f "$_conf_file.new" "$_conf_file"
+}
+
 gen_dnsmasq_main() {
     if ! check_dependencies; then
         echo -e "Dependencies missing."  >&2;
@@ -240,6 +248,9 @@ gen_dnsmasq_main() {
         else
             list_rules_pack_list "$DNSMASQ_CONFIG"
         fi
+        return $?
+    elif [ $DELETE_RULES_PACK ]; then
+        delete_dnsmasq_rule_pack "$RULES_ID" "$DNSMASQ_CONFIG"
         return $?
     fi
 
@@ -345,7 +356,12 @@ gen_dnsmasq_main() {
 }
 
 check_args() {
-    if [ $LIST_RULES_PACK ]; then
+    if [ $LIST_RULES_PACK ] || [ $DELETE_RULES_PACK ]; then
+        if [ $LIST_RULES_PACK ] && [ $DELETE_RULES_PACK ]; then
+            echo -e "--list and --delete conflict." >&2
+            return 1
+        fi
+
         if ! [ $DNSMASQ_CONFIG ] ; then
             echo -e "No specified configure." >&2
             return 1
@@ -478,6 +494,10 @@ do
         ;;
         "--force")
             FORCE_OVERWRITE=1
+        ;;
+
+        "--delete")
+            DELETE_RULES_PACK=1
         ;;
 
         *)

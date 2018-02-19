@@ -1,24 +1,48 @@
 # AutoDnsmasq
-Dnsmasq GFWList 规则的管理工具。
+自动更新 Dnsmasq 的 GFWList 规则。
 
 
 
-###### 特性
+AutoDnsmasq 每天自动维护 Dnsmasq 规则，保持规则处于最新状态。
 
-- GFWList 规则将转换为 Dnsmasq 规则
-- 生成域名列表
+
+
+**list2dnsmasq** 是一个规则转换工具，**auto-dnsmasq** 为自动更新工具。
 
 ---
 
-#### 使用方法
+### auto-dnsmasq
 
+###### 安装
 
+```bash
+wget https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/master/auto-dnsmasq && bash ./auto-dnsmasq install
+```
+
+设置更新参数：
+
+```bash
+auto-dnsmasq set-dns <上游DNS服务器>
+auto-dnsmasq set-dns-port <上游DNS服务器端口>
+auto-dnsmasq set-config	<dnsmasq 配置文件路径> #可选，默认将规则更新到 /etc/dnsmasq.conf
+auto-dnsmasq update # 立即更新 dnsmasq 规则
+```
+
+启用更新：
+
+```bash
+auto-dnsmasq enable
+```
+
+---
+
+### list2dnsmasq 
 
 ###### 生成 Dnsmasq 规则
 
 ```bash
-./auto_dnsmasq -r <上游DNS服务器>[:<端口>]  # 输出到标准输出
-./auto_dnsmasq -r <上游DNS服务器>[:<端口>] -o <路径> # 输出到指定文件
+list2dnsmasq -r <上游DNS服务器>[:<端口>]  # 输出到标准输出
+list2dnsmasq -r <上游DNS服务器>[:<端口>] -o <路径> # 输出到指定文件
 ```
 
 
@@ -26,10 +50,10 @@ Dnsmasq GFWList 规则的管理工具。
 ###### 生成规则并更新配置文件
 
 ```bash
-./auto_dnsmasq -r <上游DNS服务器>[:<端口>] -D <配置文件路径> --rules-id <规则集名称>
+list2dnsmasq -r <上游DNS服务器>[:<端口>] -D <配置文件路径> --rules-id <规则集名称>
 ```
 
-auto_dnsmasq 将规则以下格式更新到配置文件：
+list2dnsmasq 将规则以下格式更新到配置文件：
 
 >\# !AutoDnsmasqBegin!<规则集名>!
 >
@@ -40,4 +64,14 @@ auto_dnsmasq 将规则以下格式更新到配置文件：
 >...
 >
 >\# !AutoDnsmasqEnd!<规则集名>!
+
+
+
+更多选项可查看内置的帮助信息：
+
+``` bash
+list2dnsmasq --help
+```
+
+
 
