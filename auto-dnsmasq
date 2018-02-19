@@ -15,18 +15,19 @@ show_help() {
     echo -e "Usage: $0 <command>"
     echo -e ""
     echo -e "command:"
-    echo -e "   install                         Install services."
-    echo -e "   uninstall                       Remove AutoDnsmasq services."
+    echo -e "   install                             Install services."
+    echo -e "   uninstall                           Remove AutoDnsmasq services."
     echo -e ""
-    echo -e "   set-config      <file>          Set dnsmasq configure file."
-    echo -e "   set-rules-id    <id>            Set rules id."
-    echo -e "   set-ipset       <ipset>         Set target ipset."
-    echo -e "   set-dns         <addr>          Set upstream DNS."
-    echo -e "   set-dns-port    <port           Set upstream DNS port"
-    echo -e "   update                          Update rules."
-    echo -e "   enable                          Enable services"
-    echo -e "   disable                         Disable services"
-    echo -e "   status                          Show configure"
+    echo -e "   set-config          <file>          Set dnsmasq configure file."
+    echo -e "   set-rules-id        <id>            Set rules id."
+    echo -e "   set-ipset           <ipset>         Set target ipset."
+    echo -e "   set-dns             <addr>          Set upstream DNS."
+    echo -e "   set-dns-port        <port>          Set upstream DNS port"
+    echo -e "   set-service-name    <name>          Set related service name ( for reloading rules )."
+    echo -e "   update                              Update rules."
+    echo -e "   enable                              Enable services"
+    echo -e "   disable                             Disable services"
+    echo -e "   status                              Show configure"
 }
 
 check_timer_plan() {
@@ -149,6 +150,7 @@ adns_create_setting() {
     echo -e "dns=$SETTING_UPSTREAM_DNS"
     echo -e "dns_port=$SETTING_UPSTREAM_PORT"
     echo -e "rules=$SETTING_RULES_ID"
+    echo -e "service_name=$SETTING_SERVICE_NAME"
 }
 
 adns_get_with_default() {
@@ -173,16 +175,18 @@ adns_load_setting() {
         SETTING_UPSTREAM_DNS=8.8.8.8
         SETTING_UPSTREAM_PORT=53
         SETTING_RULES_ID=auto_dnsmasq_gfwlist
+        SETTING_SERVICE_NAME=dnsmasq
         adns_create_setting > $ADNS_CONF || ( echo Failed. >&2 ; return 3)
         chmod 644 $ADNS_CONF
         return 1
     fi
 
-    adns_get_with_default $ADNS_CONF dnsmasq_config SETTING_TARGET_CONF /etc/dnsmasq.conf || echo "dnsmasq_config=$SETTING_TARGET_CONF" >> "$ADNS_CONF"
-    adns_get_with_default $ADNS_CONF ipset SETTING_IPSET || echo "ipset=$SETTING_IPSET" >> "$ADNS_CONF"
-    adns_get_with_default $ADNS_CONF dns SETTING_UPSTREAM_DNS 8.8.8.8 || echo "dns=$SETTING_UPSTREAM_DNS" >> "$ADNS_CONF"
-    adns_get_with_default $ADNS_CONF dns_port SETTING_UPSTREAM_PORT || echo "dns_port=$SETTING_UPSTREAM_PORT" >> "$ADNS_CONF"
-    adns_get_with_default $ADNS_CONF rules SETTING_RULES_ID auto_dnsmasq_gfwlist || echo "rules=$SETTING_RULES_ID" >> "$ADNS_CONF"
+    adns_get_with_default "$ADNS_CONF" dnsmasq_config SETTING_TARGET_CONF /etc/dnsmasq.conf || echo "dnsmasq_config=$SETTING_TARGET_CONF" >> "$ADNS_CONF"
+    adns_get_with_default "$ADNS_CONF" ipset SETTING_IPSET || echo "ipset=$SETTING_IPSET" >> "$ADNS_CONF"
+    adns_get_with_default "$ADNS_CONF" dns SETTING_UPSTREAM_DNS 8.8.8.8 || echo "dns=$SETTING_UPSTREAM_DNS" >> "$ADNS_CONF"
+    adns_get_with_default "$ADNS_CONF" dns_port SETTING_UPSTREAM_PORT || echo "dns_port=$SETTING_UPSTREAM_PORT" >> "$ADNS_CONF"
+    adns_get_with_default "$ADNS_CONF" rules SETTING_RULES_ID auto_dnsmasq_gfwlist || echo "rules=$SETTING_RULES_ID" >> "$ADNS_CONF"
+    adns_get_with_default "$ADNS_CONF" service_name SETTING_SERVICE_NAME dnsmasq || echo "service_name=$SETTING_SERVICE_NAME" >> "$ADNS_CONF"
 }
 
 adns_status() {
@@ -195,9 +199,11 @@ adns_status() {
         return 3
     fi
 
-    echo "Dnamasq configure: $SETTING_TARGET_CONF"
+    echo "Dnsmasq configure: $SETTING_TARGET_CONF"
     echo "IP set: $SETTING_IPSET"
     echo "Upstream DNS: $SETTING_UPSTREAM_DNS:$SETTING_UPSTREAM_PORT"
+    echo "Rules ID: $SETTING_RULES_ID"
+    echo "Dnsmasq service name: $SETTING_SERVICE_NAME"
     echo ""
     
     [ $load_setting_retval == 1 ] && { 
@@ -304,8 +310,17 @@ adns_disable() {
     esac
 }
 
+adns_dnsmasq_running_systemd() {
+    _state=$(systemctl status $SETTING_SERVICE_NAME | sed -En 's/\s*Active:\s*.*\((.*)\).*/\1/p')
+    if [ "$_state" != "running" ]; then
+        return 1
+    fi
+}
+
 adns_update() {
     REQUIRE_LIST2DNSMASQ=1
+    REQUIRE_TIMER_PLANNER=1
+
     check_dependencies || return $?
     adns_load_setting || {
         echo -e "Error occurs while loading setting."
@@ -324,8 +339,20 @@ adns_update() {
         _options_dns=-r $SETTING_UPSTREAM_DNS 
     fi
 
-    $ADNS_CONVERT_CORE_NAME $_options_dns --rules-id $SETTING_RULES_ID $_options_ipset -D "$SETTING_TARGET_CONF"
+    $ADNS_CONVERT_CORE_NAME $_options_dns --rules-id $SETTING_RULES_ID $_options_ipset -D "$SETTING_TARGET_CONF" || return $?
+    case $_timer_planner in
+        systemd)
+            if adns_dnsmasq_running_systemd; then
+                echo "Restart dnsmasq... " >&2
+                systemctl restart $SETTING_SERVICE_NAME || return $?
+            fi
+        ;;
 
+        
+        *)
+            echo -e "AutoDnsmasq support $_timer_policy later." >&2
+            return 6
+    esac
 }
 
 adns_uninstall() {
@@ -410,6 +437,12 @@ case $1 in
     set-dns-port)
         shift 1
         adns_check_and_set_configure dns_port $*
+        exit $?
+    ;;
+
+    set-service-name)
+        shift 1
+        adns_check_and_set_configure service_name $*
         exit $?
     ;;
 
