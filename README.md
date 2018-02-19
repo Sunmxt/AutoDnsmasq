@@ -69,7 +69,7 @@ list2dnsmasq 将规则以下格式更新到配置文件：
 
 更多选项可查看内置的帮助信息：
 
-``` 
+``` bash
 list2dnsmasq --help
 ```
 

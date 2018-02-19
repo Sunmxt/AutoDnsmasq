@@ -1,6 +1,6 @@
 #! /bin/bash
 
-CORE_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/dev_auto_update/list2dnsmasq'
+CORE_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/master/list2dnsmasq'
 ADNS_CONF=/etc/auto_dnsmasq.conf
 ADNS_SYSTEMD=/usr/lib/systemd/system
 ADNS_SYSTEMD_SVR=auto-dnsmasq.service
