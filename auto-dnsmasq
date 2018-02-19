@@ -312,7 +312,7 @@ adns_update() {
     }
 
     if [ $SETTING_IPSET ]; then
-        _options_ipset="--ipset \"$SETTING_IPSET\""
+        _options_ipset='--ipset '"$SETTING_IPSET"
     else
         _options_ipset=
     fi
@@ -333,7 +333,15 @@ adns_uninstall() {
         return 1
     fi
 
+    check_dependencies || return $?
+    adns_load_setting || {
+        echo -e "Error occurs when loading setting." >&2
+        return 3
+    }
+    
+
     $ADNS_CORE_NAME disable 
+    $ADNS_CONVERT_CORE_NAME --rules-id $SETTING_RULES_ID -D "$SETTING_TARGET_CONF" --delete
     rm -f "$ADNS_INSTALL_DIR/$ADNS_CORE_NAME" 
     rm -f "$ADNS_INSTALL_DIR/$ADNS_CONVERT_CORE_NAME" 
     rm -f "$ADNS_SYSTEMD/$ADNS_SYSTEMD_SVR"
