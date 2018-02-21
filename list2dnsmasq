@@ -163,7 +163,7 @@ do_gen_domains_list() {
     declare -g _domain_list_tmp=/tmp/gfw_dnsmasq_domains_$RANDOM
     
     # cut '[Autoproxy]' header --> remove exceptions, regexp rules and null lines --> match domains --> cut '.' at the front of lines --> remove duplicated lines
-    cat $_gfwlist_dec | sed -n '2,$p' | grep -E '((!|@@).*|^/.*/$)' -v | grep -E '|*\.?[[:alnum:]_-]+(\.[[:alnum:]_-]+)+|*' -o | sed 's/^\.//g' | sort | uniq > $_domain_list_tmp
+    sed -En '1d;/((!|@@).*|^\/.*\/$)/d;s/\|*(\.?|.*:\/\/)([[:alnum:]_-]+(\.[[:alnum:]_-]+)+)(\/.*)?\|*/\2/p' $_gfwlist_dec | sed '/^$/d' | sort | uniq > $_domain_list_tmp 
 }
 
 do_gen_dnsmasq_rules() {
@@ -175,6 +175,30 @@ do_gen_dnsmasq_rules() {
     fi
 }
 
+check_ip_set() {
+    _set_name=$1
+    _set_type=$2
+    _overwrite=$3
+
+    _ipset_info=$(ipset list $_set_name 2>&1)
+    if echo $_ipset_info | grep "not exist" -q ; then
+        echo "Create new ipset: $_set_name" >&2
+        ipset create $_set_name $_set_type || return 1
+    else
+        _ipset_type=$(echo $_ipset_info | sed -En 's/.*Type:\s*(\S+)\s*.*/\1/p')
+        if [ "$_ipset_type" != "$_set_type" ] ; then
+            echo "Inproper IPSet type: $_ipset_type." >&2
+            if ! [ $_overwrite ]; then
+                echo "Add --force to overwrite the old." >&2
+                return 1
+            else
+                echo "Overwriting..." >&2
+                ipset destroy $_set_name || return 1
+                ipset create $_set_name $_set_type || return 1
+            fi
+        fi
+    fi 
+}
 
 do_gen_ip_list() {
     _domains_file=$1
@@ -267,66 +291,68 @@ gen_dnsmasq_main() {
     if [ $GEN_DOMAIN_LIST ]; then
         if [ $TO_FILE ]; then
             echo -e "Saving to: $TO_FILE"
-            cat $_domain_list_tmp > $TO_FILE
+            cat $_domain_list_tmp > "$TO_FILE"
         else
             cat $_domain_list_tmp
         fi
+        rm $_domain_list_tmp
         return 0
     fi
 
-    if [ $IP_SET_APPEND ] || [ $IP_SET_UPDATE ]; then
-        _ipset_info=$(ipset list $TARGET_IPSET 2>&1)
-        if echo $_ipset_info | grep "not exist" -q ; then
-            echo "Create new ipset: $TARGET_IPSET" >&2
-            ipset create $TARGET_IPSET hash:ip || return 7
+    _tmp_ip_list=/tmp/auto_dnsmasq_$RANDOM
+    declare -i _addition_ip_count=$(sed -En 's/(((2[0-4][0-9]|25[0-5]|[0-1]?[0-9]{2})\.){3}(2[0-4][0-9]|25[0-5]|[0-1]?[0-9]{2}))/\1/p' $_domain_list_tmp | tee $_tmp_ip_list | wc -l)
+
+    if [ $_addition_ip_count -ge 1 ]; then
+        echo "Found IPs with no domain." 1>&2
+        if [ $TARGET_IPSET ]; then
+            _ipset_need_append=1
+            _ipset_need_update=1
+            sed -En '/((2[0-4][0-9]|25[0-5]|[0-1]?[0-9]{2})\.){3}(2[0-4][0-9]|25[0-5]|[0-1]?[0-9]{2})/d;p' $_domain_list_tmp > $_domain_list_tmp.new
+            mv -f $_domain_list_tmp.new $_domain_list_tmp
         else
-            _ipset_type=$(echo $_ipset_info | sed -En 's/.*Type:\s*(\S+)\s*.*/\1/p')
-            if [ "$_ipset_type" != 'hash:ip' ] ; then
-                echo "Inproper IPSet type: $_ipset_type." >&2
-                if ! [ $FORCE_OVERWRITE ]; then
-                    echo "Add --force to overwrite the old." >&2
-                    return 8
-                else
-                    echo "Overwriting..." >&2
-                    ipset destroy $TARGET_IPSET || return 7
-                    ipset create $TARGET_IPSET hash:ip || return 7
-                fi
-            fi
+            echo "The following IPs cannot be appended to rules:" 1>&2
+            cat $_tmp_ip_list 1>&2
         fi
+    fi
 
-        tmp_ip_list=/tmp/auto_dnsmasq_$RANDOM
-        do_gen_ip_list $_domain_list_tmp > $tmp_ip_list
-        retval=$?
-        if [ $retval != 0 ]; then
-            rm $tmp_ip_list
-            return $retval
-        fi
+    if [ $IP_SET_APPEND ] || [ $IP_SET_UPDATE ] || [ $GEN_IP_LIST ] ; then
+        echo -n "Generating ip list..." >&2
+        do_gen_ip_list $_domain_list_tmp >> $_tmp_ip_list || {
+            echo "Failed." >&2
+            rm $_tmp_ip_list
+            return 8
+        }
+        [ $IP_SET_APPEND ] && _ipset_need_append=1
+        [ $IP_SET_UPDATE ] && _ipset_need_update=1
+    fi
 
-        
-        if [ $IP_SET_UPDATE ]; then
-            ipset flush $TARGET_IPSET || return 7
+    if [ $_ipset_need_update ] || [ $_ipset_need_append ]; then
+        check_ip_set "$TARGET_IPSET" 'hash:ip' $FORCE_OVERWRITE || return 9
+        if [ $_ipset_need_update ]; then
+            ipset flush "$TARGET_IPSET" || return 10
         fi
-        trap "AUTO_DNSMASQ_INTRUPT=1" SIGINT
-        
-        for ip in $(cat $tmp_ip_list); do
-            ipset add gfwlist $ip
+        unset AUTO_DNSMASQ_INTRUPT && trap "AUTO_DNSMASQ_INTRUPT=1" SIGINT
+        for ip in $(cat $_tmp_ip_list); do
+            ipset add "$TARGET_IPSET" $ip
             if [ $AUTO_DNSMASQ_INTRUPT ]; then
-                echo -e "Terminated by user." >&2
-                break
+                echo "Termainated by user." >&2
+                rm $_tmp_ip_list
+                rm $_domain_list_tmp
+                return 11
             fi
         done
         trap - SIGINT
-        rm tmp_ip_list
-        return 0
+        unset AUTO_DNSMASQ_INTRUPT
     fi
 
+
     if [ $GEN_IP_LIST ]; then
-        echo -e "Generating ip list..." >&2
         if [ $TO_FILE ]; then
-            do_gen_ip_list $_domain_list_tmp > "$TO_FILE" || return 6
+            cat $_tmp_ip_list > "$TO_FILE" || return 12
         else
-            do_gen_ip_list $_domain_list_tmp || return 6
+            cat $_tmp_ip_list || return 12
         fi
+        rm $_tmp_ip_list
         rm $_domain_list_tmp
         unset _domain_list_tmp
         return 0
@@ -461,7 +487,7 @@ do
             IP_SET_UPDATE=1
         ;;
 
-        "--ip-set-append")
+        "--ipset-append")
             IP_SET_APPEND=1
         ;;
 
