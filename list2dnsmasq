@@ -6,6 +6,7 @@
 # ----------------------------------------- #
 
 GFWLIST_URL="https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
+REGEXP_IPV4_ADDR='(((2[0-4][0-9]|25[0-5]|[0-1]?[0-9]{1,2})\.){3}(2[0-4][0-9]|25[0-5]|[0-1]?[0-9]{1,2}))'
 
 show_help() {
     echo -e "Tool for managing dnsmasq rules"
@@ -16,6 +17,14 @@ show_help() {
     echo -e "       -D  --configure         <configure file>    update dnsmasq configure."
     echo -e "       -l  --list                                  List AutoDnsmasq Rules"
     echo -e "           --delete                                Delete Rules"
+    
+    echo -e "\nInput:"
+    echo -e "           --from-domains      <domain_list_file>  Specified domains list."
+    echo -e "           --from-iplist       <ip_list_file>      Specified IP list."
+    echo -e "           --add-domains       <domain_list_file>  Specified additional domains list."
+    echo -e "           --add-iplist        <ip_list_file>      Specified additional IP list"
+    echo -e "       -g  --from-url          <url>               Get GFWList from <url>"
+    echo -e "           default: $GFWLIST_URL"
 
     echo -e "\nOutput:"
     echo -e "       -o  --output            <file>          save to <file>"
@@ -31,8 +40,6 @@ show_help() {
     echo -e "           default: DNS Server in resolv.conf"
     
     echo -e "\nOthers:"
-    echo -e "       -g  --from-url  <url>                   get GFWList from <url>"
-    echo -e "           default: $GFWLIST_URL"
     echo -e "       -h  --help                              show help message"
     echo -e "           --force                             Overwrite without prompting"
 }
@@ -56,14 +63,16 @@ check_exist() {
 
 check_dependencies() {
     if [ $RULES_NEED_UPDATE ]; then
-        echo -ne "checking download tools... " >&2
-        check_exist __result wget curl || ( echo -e "no" >&2; return 2)
-        echo -e "$__result" >&2
-        declare -g _do_download=$__result
+        if [ $REQUIRE_GFWLIST ]; then
+            echo -ne "checking download tools... " >&2
+            check_exist __result wget curl || ( echo -e "no" >&2; return 2)
+            echo -e "$__result" >&2
+            declare -g _do_download=$__result
 
-        echo -ne "checking base64... " >&2
-        check_exist __result base64 || ( echo -e "no" >&2; return 2)
-        echo -e "yes" >&2
+            echo -ne "checking base64... " >&2
+            check_exist __result base64 || ( echo -e "no" >&2; return 2)
+            echo -e "yes" >&2
+        fi
     
         echo -ne "checking grep... " >&2
         check_exist __result grep || ( echo -e "no" >&2; return 2)
@@ -139,8 +148,6 @@ auto_dnsmasq_rule_pack_update() {
 get_gfw_list() {
 
     _temp_file=/tmp/gfw_dnsmasq_$RANDOM
-    declare -g _gfwlist_dec=/tmp/gfw_dnsmasq_dec_$RANDOM
-
     case $_do_download in
         wget)
             wget $GFWLIST_URL -O $_temp_file || return 3
@@ -151,19 +158,25 @@ get_gfw_list() {
         ;;
     esac
     
-    echo -ne "Base64 decoding... " >&2
-    base64 -d $_temp_file > $_gfwlist_dec
+    echo -ne "Base64 decoding... " 1>&2
+    base64 -d $_temp_file
     echo -e "ok" >&2
 
     rm $_temp_file
-    unset _do_download
 }
 
-do_gen_domains_list() {
-    declare -g _domain_list_tmp=/tmp/gfw_dnsmasq_domains_$RANDOM
-    
+filter_out_domains() {
+    local _from=$1
+    sed -En 's/\|*(\.?|.*:\/\/)([[:alnum:]_-]+(\.[[:alnum:]_-]+)+)(\/.*)?\|*/\2/p' $_from
+}
+
+gen_domains_list_from_gfwlist() {
+    local _gfwlist_dec=$1
+    local _tmp=/tmp/gen_domains_list_from_gfwlist_$RANDOM
     # cut '[Autoproxy]' header --> remove exceptions, regexp rules and null lines --> match domains --> cut '.' at the front of lines --> remove duplicated lines
-    cat $_gfwlist_dec | sed -n '2,$p' | grep -E '((!|@@).*|^/.*/$)' -v | grep -E '|*\.?[[:alnum:]_-]+(\.[[:alnum:]_-]+)+|*' -o | sed 's/^\.//g' | sort | uniq > $_domain_list_tmp
+    sed -E '1d;/((!|@@).*|^\/.*\/$)/d;' $_gfwlist_dec > $_tmp 
+    filter_out_domains $_tmp | sed '/^$/d' | sort | uniq
+    rm $_tmp
 }
 
 do_gen_dnsmasq_rules() {
@@ -175,6 +188,30 @@ do_gen_dnsmasq_rules() {
     fi
 }
 
+check_ip_set() {
+    _set_name=$1
+    _set_type=$2
+    _overwrite=$3
+
+    _ipset_info=$(ipset list $_set_name 2>&1)
+    if echo $_ipset_info | grep "not exist" -q ; then
+        echo "Create new ipset: $_set_name" >&2
+        ipset create $_set_name $_set_type || return 1
+    else
+        _ipset_type=$(echo $_ipset_info | sed -En 's/.*Type:\s*(\S+)\s*.*/\1/p')
+        if [ "$_ipset_type" != "$_set_type" ] ; then
+            echo "Inproper IPSet type: $_ipset_type." >&2
+            if ! [ $_overwrite ]; then
+                echo "Add --force to overwrite the old." >&2
+                return 1
+            else
+                echo "Overwriting..." >&2
+                ipset destroy $_set_name || return 1
+                ipset create $_set_name $_set_type || return 1
+            fi
+        fi
+    fi 
+}
 
 do_gen_ip_list() {
     _domains_file=$1
@@ -235,9 +272,53 @@ delete_dnsmasq_rule_pack() {
     mv -f "$_conf_file.new" "$_conf_file"
 }
 
+make_domains_list() {
+    _tmp_gfw_domains=/tmp/auto_dnsmasq_domains_make_$RANDOM
+    if ! [ $FROM_DOMAINS ]; then
+        echo -e "Get GFWList: $GFWLIST_URL" >&2
+        echo -e "----------------------------------------------------" >&2
+        if ! get_gfw_list > $_tmp_gfw_domains ; then
+            echo -e "Unable to get GFWList" >&2;
+            return 1
+        fi
+        echo -e "----------------------------------------------------" >&2
+
+        echo -e "Generating domains list..." >&2
+        gen_domains_list_from_gfwlist $_tmp_gfw_domains || return 1
+    else
+        filter_out_domains $FROM_DOMAINS || return 1
+    fi
+
+    if [ $ADD_DOMAINS ]; then
+        filter_out_domains "$ADD_DOMAINS" || return 1
+    fi
+    rm $_tmp_gfw_domains 2> /dev/null 
+    return 0
+}
+
+filter_out_ip() {
+    local _from=$1
+    sed -En 's/'$REGEXP_IPV4_ADDR'/\1/p' $_from
+}
+
+
+make_ip_list() {
+    local _from=$1
+    if [ $IP_SET_APPEND ] || [ $IP_SET_UPDATE ] || [ $GEN_IP_LIST ] ; then
+        echo -n "Generating ip list..." >&2
+        do_gen_ip_list $_from || {
+            echo "Failed." >&2
+            return 1
+        }
+    fi
+    
+}
+
 gen_dnsmasq_main() {
+    check_args || exit $?
+
     if ! check_dependencies; then
-        echo -e "Dependencies missing."  >&2;
+        echo -e "Dependencies missing."  >&2
         return 2
     fi
     echo -e "Dependencies check finished..\n" >&2
@@ -254,87 +335,78 @@ gen_dnsmasq_main() {
         return $?
     fi
 
-    echo -e "Get GFWList: $GFWLIST_URL" >&2
-    echo -e "----------------------------------------------------" >&2
-    if ! get_gfw_list >&2 ; then
-        echo -e "Unable to get GFWList" >&2;
-        return 3
-    fi
-    echo -e "----------------------------------------------------" >&2
-    
-    echo -e "Generating domains list..." >&2
-    do_gen_domains_list || return 4
-    if [ $GEN_DOMAIN_LIST ]; then
-        if [ $TO_FILE ]; then
-            echo -e "Saving to: $TO_FILE"
-            cat $_domain_list_tmp > $TO_FILE
-        else
-            cat $_domain_list_tmp
-        fi
-        return 0
-    fi
-
-    if [ $IP_SET_APPEND ] || [ $IP_SET_UPDATE ]; then
-        _ipset_info=$(ipset list $TARGET_IPSET 2>&1)
-        if echo $_ipset_info | grep "not exist" -q ; then
-            echo "Create new ipset: $TARGET_IPSET" >&2
-            ipset create $TARGET_IPSET hash:ip || return 7
-        else
-            _ipset_type=$(echo $_ipset_info | sed -En 's/.*Type:\s*(\S+)\s*.*/\1/p')
-            if [ "$_ipset_type" != 'hash:ip' ] ; then
-                echo "Inproper IPSet type: $_ipset_type." >&2
-                if ! [ $FORCE_OVERWRITE ]; then
-                    echo "Add --force to overwrite the old." >&2
-                    return 8
-                else
-                    echo "Overwriting..." >&2
-                    ipset destroy $TARGET_IPSET || return 7
-                    ipset create $TARGET_IPSET hash:ip || return 7
-                fi
+    _ip_list_tmp=/tmp/gfw_iplist_$RANDOM
+    _domain_list_tmp=/tmp/gfw_dnsmasq_domains_$RANDOM
+    if ! [ $FROM_IPLIST ]; then
+        make_domains_list > $_domain_list_tmp || return 3
+        if [ $GEN_DOMAIN_LIST ]; then
+            if [ $TO_FILE ]; then
+                echo -e "Saving to: $TO_FILE"
+                cat $_domain_list_tmp > "$TO_FILE"
+            else
+                cat $_domain_list_tmp
             fi
+            return 0
         fi
-
-        tmp_ip_list=/tmp/auto_dnsmasq_$RANDOM
-        do_gen_ip_list $_domain_list_tmp > $tmp_ip_list
-        retval=$?
-        if [ $retval != 0 ]; then
-            rm $tmp_ip_list
-            return $retval
-        fi
-
         
-        if [ $IP_SET_UPDATE ]; then
-            ipset flush $TARGET_IPSET || return 7
+        declare -i _addition_ip_count=$(filter_out_ip $_domain_list_tmp | tee $_ip_list_tmp | wc -l)
+        if [ $_addition_ip_count -ge 1 ]; then
+            echo "Found IPs with no domain." 1>&2
+            sed -En '/'$REGEXP_IPV4_ADDR'/d;p' $_domain_list_tmp > $_domain_list_tmp.new
+            mv -f $_domain_list_tmp.new $_domain_list_tmp
         fi
-        trap "AUTO_DNSMASQ_INTRUPT=1" SIGINT
-        
-        for ip in $(cat $tmp_ip_list); do
-            ipset add gfwlist $ip
+        make_ip_list $_domain_list_tmp >> $_ip_list_tmp || return 4
+    else
+        filter_out_ip $FROM_IPLIST >> $_ip_list_tmp || return 5
+    fi
+    if [ $ADD_IPLIST ]; then
+        filter_out_ip $ADD_IPLIST >> $_ip_list_tmp || return 6
+    fi
+    if [ $(cat $_ip_list_tmp | wc -l) -ge 1 ] ; then
+        if [ $TARGET_IPSET ]; then
+            _ipset_need_append=1
+            _ipset_need_update=1
+        else
+            echo "The following IPs cannot be appended to rules:" 1>&2
+            cat $_ip_list_tmp 1>&2
+        fi
+    fi
+    [ $IP_SET_APPEND ] && _ipset_need_append=1
+    [ $IP_SET_UPDATE ] && _ipset_need_update=1
+
+    if [ $_ipset_need_update ] || [ $_ipset_need_append ]; then
+        check_ip_set "$TARGET_IPSET" 'hash:ip' $FORCE_OVERWRITE || return 7
+        if [ $_ipset_need_update ]; then
+            ipset flush "$TARGET_IPSET" || return 8
+        fi
+        unset AUTO_DNSMASQ_INTRUPT && trap "AUTO_DNSMASQ_INTRUPT=1" SIGINT
+        for ip in $(cat $_ip_list_tmp); do
+            ipset add "$TARGET_IPSET" $ip
             if [ $AUTO_DNSMASQ_INTRUPT ]; then
-                echo -e "Terminated by user." >&2
-                break
+                echo "Termainated by user." >&2
+                return 9
             fi
         done
         trap - SIGINT
-        rm tmp_ip_list
-        return 0
+        unset AUTO_DNSMASQ_INTRUPT
     fi
 
     if [ $GEN_IP_LIST ]; then
-        echo -e "Generating ip list..." >&2
         if [ $TO_FILE ]; then
-            do_gen_ip_list $_domain_list_tmp > "$TO_FILE" || return 6
+            cat $_ip_list_tmp > "$TO_FILE" || return 10
         else
-            do_gen_ip_list $_domain_list_tmp || return 6
+            cat $_ip_list_tmp || return 10
         fi
-        rm $_domain_list_tmp
-        unset _domain_list_tmp
         return 0
     fi
 
+    if [ $FROM_IPLIST ]; then
+        return 0
+    fi 
+
     echo -e "Generating dnsmasq rules..." >&2
     _temp_rules_file=/tmp/auto_dnsmasq_rules_$RANDOM
-    do_gen_dnsmasq_rules "$_domain_list_tmp" > "$_temp_rules_file" || return 5
+    do_gen_dnsmasq_rules "$_domain_list_tmp" > "$_temp_rules_file" || return 10
     rm $_domain_list_tmp
     unset _domain_list_tmp
     if [ $TO_FILE ]; then
@@ -344,7 +416,7 @@ gen_dnsmasq_main() {
     fi
 
     if [ $DNSMASQ_CONFIG ]; then
-        echo -e "Update to configure: $DNSMASQ_CONFIG ..." >&2
+        echo -e "Update configure: $DNSMASQ_CONFIG ..." >&2
         auto_dnsmasq_rule_pack_update "$DNSMASQ_CONFIG" "$_temp_rules_file" "$RULES_ID"
     else
         cat $_temp_rules_file
@@ -353,6 +425,14 @@ gen_dnsmasq_main() {
 
 
     echo -e "Finished." >&2
+}
+
+do_cleanning() {
+    rm $_domain_list_tmp
+}
+main() {
+    gen_dnsmasq_main
+    do_cleanning 2>/dev/null
 }
 
 check_args() {
@@ -374,6 +454,13 @@ check_args() {
 
 
     declare -g RULES_NEED_UPDATE=1
+
+    if ! [ $FROM_DOMAINS ] && ! [ $FROM_IPLIST ]; then
+        REQUIRE_GFWLIST=1
+    elif [ $FROM_DOMAINS ]  && [ $FROM_IPLIST ]; then
+        echo "--from-domains and --from-iplist conflict." >&2
+        return 1
+    fi
 
     if [ $GEN_DOMAIN_LIST ]; then
         return 0
@@ -461,7 +548,7 @@ do
             IP_SET_UPDATE=1
         ;;
 
-        "--ip-set-append")
+        "--ipset-append")
             IP_SET_APPEND=1
         ;;
 
@@ -500,6 +587,26 @@ do
             DELETE_RULES_PACK=1
         ;;
 
+        "--from-domains")
+            FROM_DOMAINS_PARSED=1
+            WAIT_PARAMS=1
+        ;;
+
+        "--from-iplist")
+            FROM_IPLIST_PARSED=1
+            WAIT_PARAMS=1
+        ;;
+
+        "--add-domains")
+            ADD_DOMAINS_PARSED=1
+            WAIT_PARAMS=1
+        ;;
+
+        "--add-iplist")
+            ADD_IPLIST_PARSED=1
+            WAIT_PARAMS=1
+        ;;
+
         *)
             if [ $WAIT_PARAMS ]; then
                 if [ $TO_FILE_PARSED ]; then
@@ -520,7 +627,19 @@ do
                     unset RULES_ID_PARSED
                 elif [ $IP_SET_PARSED ]; then
                     TARGET_IPSET=$1
-                    unset RULES_IPSET_PARSED
+                    unset IP_SET_PARSED
+                elif [ $ADD_DOMAINS_PARSED ]; then
+                    ADD_DOMAINS=$1
+                    unset ADD_DOMAINS_PARSED
+                elif [ $ADD_IPLIST_PARSED ]; then
+                    ADD_IPLIST=$1
+                    unset ADD_IPLIST_PARSED
+                elif [ $FROM_DOMAINS_PARSED ]; then
+                    FROM_DOMAINS=$1
+                    unset FROM_DOMAINS_PARSED
+                elif [ $FROM_IPLIST_PARSED ]; then
+                    FROM_IPLIST=$1
+                    unset FROM_IPLIST_PARSED
                 fi
                 unset WAIT_PARAMS
             else
@@ -532,5 +651,4 @@ do
     shift 1
 done
 
-check_args || exit $?
-gen_dnsmasq_main
+main
