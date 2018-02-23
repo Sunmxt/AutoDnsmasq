@@ -167,7 +167,7 @@ get_gfw_list() {
 
 filter_out_domains() {
     local _from=$1
-    sed -En 's/\|*(\.?|.*:\/\/)([[:alnum:]_-]+(\.[[:alnum:]_-]+)+)(\/.*)?\|*/\2/p' $_from
+    sed -En 's/^\|*(\.?|.*:\/\/)([[:alnum:]_-]+(\.[[:alnum:]_-]+)+)(\/.*)?\|*/\2/p' $_from
 }
 
 gen_domains_list_from_gfwlist() {
@@ -298,7 +298,7 @@ make_domains_list() {
 
 filter_out_ip() {
     local _from=$1
-    sed -En 's/'$REGEXP_IPV4_ADDR'/\1/p' $_from
+    sed -En 's/'$REGEXP_IPV4_ADDR'.*/\1/p' $_from
 }
 
 
@@ -433,6 +433,7 @@ do_cleanning() {
 main() {
     gen_dnsmasq_main
     do_cleanning 2>/dev/null
+    return 0
 }
 
 check_args() {

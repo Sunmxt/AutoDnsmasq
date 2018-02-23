@@ -1,7 +1,13 @@
 #! /bin/bash
 
 CORE_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/master/list2dnsmasq'
-ADNS_CONF=/etc/auto_dnsmasq.conf
+DEFAULT_DOMAIN_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/master/res/domain'
+DEFAULT_IP_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/master/res/ip_address'
+
+ADNS_CONF_DIR=/etc/auto-dnsmasq
+ADNS_CONF=$ADNS_CONF_DIR/auto-dnsmasq.conf
+ADNS_ADDIT_IP=$ADNS_CONF_DIR/ip_address
+ADNS_ADDIT_DOMAIN=$ADNS_CONF_DIR/domain
 ADNS_SYSTEMD=/usr/lib/systemd/system
 ADNS_SYSTEMD_SVR=auto-dnsmasq.service
 ADNS_SYSTEMD_TIMER=auto-dnsmasq.timer
@@ -119,10 +125,21 @@ adns_install() {
     check_dependencies || return $?
     
     _core_tmp=/tmp/list2dnsmasq
+    _domain_tmp=/tmp/domain$RANDOM$RANDOM
+    _ip_tmp=/tmp/ip$RANDOM$RANDOM
     get_resource "$_core_tmp" "$CORE_URL" || {
         echo -e "Cannot get list2dnsmasq." >&2
         return 2
     }
+    get_resource $_domain_tmp "$DEFAULT_DOMAIN_URL" || {
+        echo -e "Cannot get default domain list." >&2
+        return 2
+    }
+    get_resource $_ip_tmp "$DEFAULT_IP_URL" || {
+        echo -e "Cannot get default ip list." >&2
+        return 2
+    }
+    mkdir -p $ADNS_CONF_DIR
     chmod 755 $_core_tmp
 
     cp -f "$0" "$ADNS_INSTALL_DIR/$ADNS_CORE_NAME" || {
@@ -135,10 +152,20 @@ adns_install() {
         echo -e "Error occurs when install $ADNS_CORE_NAME/$ADNS_CONVERT_CORE_NAME"
         return 3
     }
+
+    mv -f $_ip_tmp "$ADNS_ADDIT_IP" || {
+        echo -e "Error occurs when install $ADNS_ADDIT_IP"
+        return 3
+    }
+
+    mv -f $_domain_tmp "$ADNS_ADDIT_DOMAIN" || {
+        echo -e "Error occurs when install $ADNS_ADDIT_DOMAIN"
+    }
     
     echo "Ininitialize..."
     $ADNS_CORE_NAME status
 }
+
 
 adns_create_setting() {
     echo -e "# --------------------------------------- #"
@@ -339,7 +366,16 @@ adns_update() {
         _options_dns=-r $SETTING_UPSTREAM_DNS 
     fi
 
-    $ADNS_CONVERT_CORE_NAME $_options_dns --rules-id $SETTING_RULES_ID $_options_ipset -D "$SETTING_TARGET_CONF" || return $?
+    if [ -e $ADNS_ADDIT_IP ]; then
+        _options_addit_ip="--add-iplist $ADNS_ADDIT_IP"
+    fi
+
+    if [ -e $ADNS_ADDIT_DOMAIN ]; then
+        _options_addit_domain="--add-domains $ADNS_ADDIT_DOMAIN"
+    fi
+
+    echo $ADNS_ADDIT_DOMAIN
+    $ADNS_CONVERT_CORE_NAME $_options_dns --rules-id $SETTING_RULES_ID $_options_ipset -D "$SETTING_TARGET_CONF" $_options_addit_ip $_options_addit_domain || return $?
     case $_timer_planner in
         systemd)
             if adns_dnsmasq_running_systemd; then
@@ -374,7 +410,8 @@ adns_uninstall() {
     rm -f "$ADNS_INSTALL_DIR/$ADNS_CONVERT_CORE_NAME" 
     rm -f "$ADNS_SYSTEMD/$ADNS_SYSTEMD_SVR"
     rm -f "$ADNS_SYSTEMD/$ADNS_SYSTEMD_TIMER"
-    mv -f "$ADNS_CONF" "$ADNS_CONF.bak"
+    rm -rf "$ADNS_CONF_DIR.bak" 2> /dev/null
+    mv -f "$ADNS_CONF_DIR" "$ADNS_CONF_DIR.bak"
 
     echo -e "Finished." >&2
 }
