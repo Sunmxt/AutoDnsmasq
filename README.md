@@ -3,11 +3,13 @@
 
 
 
+适用于 Dnsmasq ，用于快速解决 DNS 污染问题。
+
 AutoDnsmasq 每天自动维护 Dnsmasq 规则，保持规则处于最新状态。
 
 
 
-**list2dnsmasq** 是一个灵活的规则转换工具，**auto-dnsmasq** 为自动更新工具。
+**list2dnsmasq** 是一个灵活的规则转换工具，**auto-dnsmasq** 为规则的自动维护工具。
 
 ---
 

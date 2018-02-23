@@ -298,7 +298,7 @@ make_domains_list() {
 
 filter_out_ip() {
     local _from=$1
-    sed -En 's/'$REGEXP_IPV4_ADDR'/\1/p' $_from
+    sed -En 's/'$REGEXP_IPV4_ADDR'.*/\1/p' $_from
 }
 
 
