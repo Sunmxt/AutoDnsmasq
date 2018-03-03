@@ -1,8 +1,8 @@
 #! /bin/bash
 
-CORE_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/master/list2dnsmasq'
-DEFAULT_DOMAIN_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/master/res/domain'
-DEFAULT_IP_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/master/res/ip_address'
+CORE_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/dev/list2dnsmasq'
+DEFAULT_DOMAIN_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/dev/res/domain'
+DEFAULT_IP_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/dev/res/ip_address'
 
 ADNS_CONF_DIR=/etc/auto-dnsmasq
 ADNS_CONF=$ADNS_CONF_DIR/auto-dnsmasq.conf
@@ -248,6 +248,7 @@ adns_status() {
 adns_cat_systemd_service() {
     echo '[Unit]'
     echo 'Description=Update GFWList to dnsmasq rules'
+    echo "Requires=$ADNS_SYSTEMD_TIMER"
     echo 'Wants=network.target'
     echo 'Before=network.target'
     echo ''
@@ -314,6 +315,7 @@ adns_enable() {
     case $_timer_planner in
         systemd)
             systemctl enable $ADNS_SYSTEMD_TIMER || return $?
+            systemctl enable $ADNS_SYSTEMD_SVR || return $?
         ;;
 
         *)
@@ -329,6 +331,7 @@ adns_disable() {
     case $_timer_planner in
         systemd)
             systemctl disable $ADNS_SYSTEMD_TIMER || return $?
+            systemctl disable $ADNS_SYSTEMD_SVR || return $?
         ;;
 
         *)
@@ -374,8 +377,14 @@ adns_update() {
         _options_addit_domain="--add-domains $ADNS_ADDIT_DOMAIN"
     fi
 
-    echo $ADNS_ADDIT_DOMAIN
-    $ADNS_CONVERT_CORE_NAME $_options_dns --rules-id $SETTING_RULES_ID $_options_ipset -D "$SETTING_TARGET_CONF" $_options_addit_ip $_options_addit_domain || return $?
+    while true
+    do
+        if $ADNS_CONVERT_CORE_NAME $_options_dns --rules-id $SETTING_RULES_ID $_options_ipset -D "$SETTING_TARGET_CONF" $_options_addit_ip $_options_addit_domain; then
+            break
+        fi
+        echo "Errors occurs when generating rules. Retry in 15 seconds."
+        sleep 15
+    done
     case $_timer_planner in
         systemd)
             if adns_dnsmasq_running_systemd; then

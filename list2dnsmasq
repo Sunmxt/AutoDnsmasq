@@ -432,7 +432,9 @@ do_cleanning() {
 }
 main() {
     gen_dnsmasq_main
+    local retval=$?
     do_cleanning 2>/dev/null
+    return $retval
 }
 
 check_args() {
