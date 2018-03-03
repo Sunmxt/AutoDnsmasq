@@ -385,6 +385,7 @@ adns_update() {
         echo "Errors occurs when generating rules. Retry in 15 seconds."
         sleep 15
     done
+
     case $_timer_planner in
         systemd)
             if adns_dnsmasq_running_systemd; then
