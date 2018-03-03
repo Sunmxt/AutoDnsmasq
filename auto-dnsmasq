@@ -1,8 +1,8 @@
 #! /bin/bash
 
-CORE_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/dev/list2dnsmasq'
-DEFAULT_DOMAIN_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/dev/res/domain'
-DEFAULT_IP_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/dev/res/ip_address'
+CORE_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/master/list2dnsmasq'
+DEFAULT_DOMAIN_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/master/res/domain'
+DEFAULT_IP_URL='https://raw.githubusercontent.com/Sunmxt/AutoDnsmasq/master/res/ip_address'
 
 ADNS_CONF_DIR=/etc/auto-dnsmasq
 ADNS_CONF=$ADNS_CONF_DIR/auto-dnsmasq.conf
@@ -385,6 +385,7 @@ adns_update() {
         echo "Errors occurs when generating rules. Retry in 15 seconds."
         sleep 15
     done
+
     case $_timer_planner in
         systemd)
             if adns_dnsmasq_running_systemd; then
