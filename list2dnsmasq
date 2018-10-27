@@ -50,7 +50,7 @@ check_exist() {
     while [ $1 ]
     do
         shift 1
-        __path=$(whereis $1 | cut -d ':' -f 2 -) 
+        __path=$(which $1 | cut -d ':' -f 2 -) 
         __path=${__path-}
         if [ "$__path" != "" ]; then
             eval $__result_to=$1
